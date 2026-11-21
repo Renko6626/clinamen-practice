@@ -8,10 +8,14 @@ export const keys = {
   ShiftRight: 1 << 6,
 }
 
-export async function fetchAsset(path, version) {
+export function assetUrl(path, version) {
   const url = new URL(`${import.meta.env.BASE_URL}practice/${path}`, document.baseURI)
   if (version) url.searchParams.set('v', version)
-  const response = await fetch(url)
+  return url
+}
+
+export async function fetchAsset(path, version) {
+  const response = await fetch(assetUrl(path, version), { cache: version ? 'default' : 'no-cache' })
   if (!response.ok) throw new Error(`无法加载 ${path}（HTTP ${response.status}）`)
   return response
 }
@@ -24,6 +28,7 @@ export async function openEngine(manifest) {
   if (wasm.engine_version() !== manifest.engineVersion || tablesHash !== manifest.tablesHash) {
     throw new Error('引擎与卡库版本不匹配')
   }
+  if (wasm.frame_format?.() !== 2) throw new Error('战场渲染版本不匹配，请刷新页面')
 
   function readError() {
     const bytes = new Uint8Array(wasm.memory.buffer, wasm.error_ptr(), wasm.error_len())

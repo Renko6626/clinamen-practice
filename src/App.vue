@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { drawFrame } from './draw'
+import { openRenderer } from './draw'
 import { fetchAsset, keys, openEngine } from './engine'
 
 const titles = {
@@ -57,6 +57,7 @@ const statusText = computed(() => {
 })
 
 let engine
+let renderFrame
 let loadedCard
 let attempt
 let pendingLoad = 0
@@ -75,7 +76,7 @@ function resetSelection() {
   copied.value = false
   error.value = ''
   state.value = 'ready'
-  drawFrame(canvas.value)
+  renderFrame()
 }
 
 function chooseCard(next) {
@@ -100,7 +101,7 @@ function setStage(next) {
 
 function paint() {
   const view = engine.frame()
-  drawFrame(canvas.value, view)
+  renderFrame(view)
   frame.value = view[0]
 }
 
@@ -225,7 +226,12 @@ onMounted(async () => {
   try {
     const response = await fetchAsset('manifest.json')
     catalog.value = await response.json()
-    engine = await openEngine(catalog.value)
+    const [readyEngine, readyRenderer] = await Promise.all([
+      openEngine(catalog.value),
+      openRenderer(canvas.value, catalog.value),
+    ])
+    engine = readyEngine
+    renderFrame = readyRenderer
     setSource(sources.value[0])
   } catch (cause) {
     error.value = cause.message
@@ -246,17 +252,17 @@ onUnmounted(() => {
 <template>
   <main class="practice">
     <header class="page-head">
-      <div class="brand">Clinamen</div>
-      <h1>弹幕练习场</h1>
+      <h1>Clinamen <span>弹幕练习场</span></h1>
     </header>
 
     <div class="practice-layout">
       <aside class="library" aria-label="段落库">
-        <div class="library-head">
-          <h2>选段</h2>
-          <span v-if="catalog">{{ visibleCards.length }} 段</span>
+        <div class="rail-head">
+          <h2>选择段落</h2>
+          <span v-if="source">{{ visibleCards.length }} 段</span>
         </div>
-        <div class="source-list" aria-label="作品">
+
+        <div class="source-list" role="group" aria-label="作品">
           <button
             v-for="value in sources"
             :key="value"
@@ -266,85 +272,87 @@ onUnmounted(() => {
             @click="setSource(value)"
           >{{ titles[value] ?? value }}</button>
         </div>
-        <label v-if="source" class="stage-select">
+
+        <label v-if="source" class="setting-row">
           <span>关卡</span>
           <select :value="stage ?? 'standalone'" @change="setStage($event.target.value)">
             <option value="all">全部关卡</option>
             <option v-for="value in stages" :key="value" :value="value ?? 'standalone'">{{ stageName(value) }}</option>
           </select>
         </label>
+
         <ul v-if="visibleCards.length" class="card-list">
           <li v-for="item in visibleCards" :key="item.id">
             <button type="button" :aria-pressed="card === item" @click="chooseCard(item)">
               <span>{{ item.title }}</span>
-              <small>{{ stageName(item.stage) }}</small>
+              <small v-if="stage === 'all'">{{ stageName(item.stage) }}</small>
             </button>
           </li>
         </ul>
         <p v-else class="library-empty">{{ state === 'failed' ? '卡库加载失败' : '正在载入卡库…' }}</p>
       </aside>
 
-      <section class="game" aria-label="挑战">
-        <header class="game-head">
-          <div class="game-title">
-            <span v-if="card" class="game-source">{{ titles[card.source] ?? card.source }} · {{ stageName(card.stage) }}</span>
-            <h2>{{ card?.title ?? '单段挑战' }}</h2>
-          </div>
-          <div v-if="card" class="game-options">
-            <label v-if="card.marks.length > 1">
-              <span class="sr-only">起点</span>
-              <select v-model.number="mark" @change="resetSelection">
-                <option v-for="value in card.marks" :key="value" :value="value">起点 {{ value }}</option>
-              </select>
-            </label>
-            <label>
-              <span class="sr-only">难度</span>
-              <select v-model.number="rank" @change="resetSelection">
-                <option v-for="value in card.ranks" :key="value" :value="value">{{ rankNames[value] }}</option>
-              </select>
-            </label>
-          </div>
-        </header>
-
-        <div class="screen">
-          <div class="arena">
-            <canvas ref="canvas" width="384" height="448" tabindex="0" aria-label="弹幕画面"></canvas>
-            <div v-if="state !== 'running'" class="arena-overlay">
-              <div v-if="state === 'finished'" class="finish">
-                <strong>{{ results[outcome] }}</strong>
-                <span>{{ time }} 秒</span>
-              </div>
-              <p v-if="error" class="error" role="alert">{{ error }}</p>
-              <button v-if="state === 'ready'" class="primary" type="button" @click="start()">开始挑战</button>
-              <button v-else-if="state === 'paused'" class="primary" type="button" @click="beginClock">继续挑战</button>
-              <button v-else-if="state === 'finished'" class="primary" type="button" @click="start(true)">同种子重试</button>
-              <span v-else-if="state === 'loading' || state === 'connecting'" role="status">{{ statusText }}…</span>
-            </div>
-          </div>
-          <div class="screen-status">
-            <span><i :class="{ active: isPlaying }"></i>{{ statusText }}</span>
-            <span>{{ time }} s</span>
-          </div>
+      <section class="game" aria-label="战场">
+        <div class="screen-status">
+          <span><i :class="{ active: isPlaying }"></i>{{ statusText }}</span>
+          <span class="timer">{{ time }} <span>秒</span></span>
         </div>
 
-        <footer class="game-controls">
-          <div class="key-guide">
-            <span><kbd>↑↓←→</kbd> 移动</span>
-            <span><kbd>Z</kbd> 射击</span>
-            <span><kbd>Shift</kbd> 低速</span>
-            <span><kbd>Esc</kbd> 暂停</span>
+        <div class="arena">
+          <canvas ref="canvas" width="768" height="896" tabindex="0" aria-label="弹幕画面"></canvas>
+          <div v-if="!isPlaying" class="arena-overlay" :class="{ paused: state === 'paused' || state === 'finished' }">
+            <div v-if="state === 'finished'" class="finish">
+              <strong>{{ results[outcome] }}</strong>
+              <span>存活 {{ time }} 秒</span>
+            </div>
+            <p v-if="error" class="error" role="alert">{{ error }}</p>
+            <button v-if="state === 'ready'" class="primary" type="button" @click="start()">开始挑战</button>
+            <button v-else-if="state === 'paused'" class="primary" type="button" @click="beginClock">继续挑战</button>
+            <button v-else-if="state === 'finished'" class="primary" type="button" @click="start(true)">同种子重试</button>
+            <span v-else-if="state === 'loading' || state === 'connecting'" role="status">{{ statusText }}…</span>
           </div>
-          <div v-if="attempt || state === 'finished'" class="session-actions">
-            <button v-if="state === 'paused'" type="button" @click="start(true)">同种子重试</button>
-            <button v-if="state === 'finished'" type="button" @click="start()">换种子</button>
-            <button type="button" @click="copyFeedback">{{ copied ? '已复制' : '复制反馈' }}</button>
-          </div>
-        </footer>
+        </div>
+      </section>
+
+      <aside class="controls" aria-label="对局设置">
+        <section v-if="card" class="current-card">
+          <div class="rail-head"><h2>当前段落</h2></div>
+          <p class="game-source">{{ titles[card.source] ?? card.source }} / {{ stageName(card.stage) }}</p>
+          <p class="game-title">{{ card.title }}</p>
+          <label class="setting-row">
+            <span>难度</span>
+            <select v-model.number="rank" @change="resetSelection">
+              <option v-for="value in card.ranks" :key="value" :value="value">{{ rankNames[value] }}</option>
+            </select>
+          </label>
+          <label v-if="card.marks.length > 1" class="setting-row">
+            <span>起点</span>
+            <select v-model.number="mark" @change="resetSelection">
+              <option v-for="value in card.marks" :key="value" :value="value">{{ value }}</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="key-settings">
+          <div class="rail-head"><h2>键位</h2></div>
+          <dl class="key-guide">
+            <div><dt>移动</dt><dd><kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd></dd></div>
+            <div><dt>射击</dt><dd><kbd>Z</kbd></dd></div>
+            <div><dt>低速</dt><dd><span>按住</span><kbd>Shift</kbd></dd></div>
+            <div><dt>暂停</dt><dd><kbd>Esc</kbd></dd></div>
+          </dl>
+        </section>
+
+        <div v-if="attempt" class="session-actions">
+          <button v-if="state === 'paused'" type="button" @click="start(true)">同种子重试</button>
+          <button v-if="state === 'finished'" type="button" @click="start()">换种子</button>
+          <button type="button" @click="copyFeedback">{{ copied ? '已复制' : '复制反馈' }}</button>
+        </div>
         <label v-if="feedback" class="feedback">
           <span>复制以下内容，补充你看到的情况。</span>
           <textarea :value="feedback" rows="6" readonly @focus="$event.target.select()"></textarea>
         </label>
-      </section>
+      </aside>
     </div>
   </main>
 </template>
